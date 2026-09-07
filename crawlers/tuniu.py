@@ -34,7 +34,8 @@ from typing import Any, List, Optional
 import httpx
 
 from core.models import FlightPrice
-from .base import BaseCrawler
+from core.flights import parse_itinerary_nos, format_itinerary, first_iata
+from .base import BaseCrawler, INTER_CODES, CITY_NAME
 
 UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
@@ -64,7 +65,7 @@ class TuniuCrawler(BaseCrawler):
         self._rate_lock = threading.Lock()
 
     def login_url(self) -> str:
-        return "https://m.tuniu.com/login"
+        return "https://passport.tuniu.com/login/mapp"
 
     def _rate_acquire(self):
         while True:
@@ -145,7 +146,7 @@ class TuniuCrawler(BaseCrawler):
         data = obj.get("data") or {}
         return bool(data.get("fareList")) or cls._has_price(data)
 
-    def _one_attempt(self, depart_code, arrive_code, depart_date):
+    def _one_attempt(self, depart_code, arrive_code, depart_date, back_date=None):
         client = httpx.Client(
             headers={
                 "User-Agent": self._ua() or UA,
@@ -158,22 +159,32 @@ class TuniuCrawler(BaseCrawler):
         )
         try:
             client.get(FLIGHT_HOME)
+            trip = "RT" if back_date else "OW"
             list_url = (
                 f"https://m.tuniu.com/flight/domestic/new/"
-                f"{depart_code}_{arrive_code}_OW_1_0_0?deptDate={depart_date}&isGo=0"
+                f"{depart_code}_{arrive_code}_{trip}_1_0_0?deptDate={depart_date}&isGo=0"
             )
+            if back_date:
+                list_url += f"&backDate={back_date}"
             client.get(list_url)
 
             self._install_tac_cookies(client)
             mtoken = client.cookies.get("mtoken", "") or ""
 
+            segments = [
+                {"dCityIataCode": depart_code, "aCityIataCode": arrive_code, "departDate": depart_date}
+            ]
+            if back_date:
+                segments.append({
+                    "dCityIataCode": arrive_code,
+                    "aCityIataCode": depart_code,
+                    "departDate": back_date,
+                })
             d_tmpl = {
                 "systemId": 53, "channelCount": 0,
                 "adultQuantity": 1, "childQuantity": 0, "babyQuantity": 0,
                 "supportBlack": True,
-                "segmentList": [
-                    {"dCityIataCode": depart_code, "aCityIataCode": arrive_code, "departDate": depart_date}
-                ],
+                "segmentList": segments,
                 "rph": 0, "hackersFlightNos": None, "tokenKey": mtoken,
             }
             api_hdrs = {"Referer": "https://m.tuniu.com/", "Accept": "application/json"}
@@ -197,57 +208,51 @@ class TuniuCrawler(BaseCrawler):
         finally:
             client.close()
 
-    def _hoop(self, fc, tc, date) -> Optional[dict]:
+    def _hoop(self, fc, tc, date, back_date=None) -> Optional[dict]:
         attempt = 0
+        tag = f"{date}/{back_date}" if back_date else date
         while True:
             attempt += 1
             if self.rate_limit:
                 self._rate_acquire()
-            ok, raw, blocked = self._one_attempt(fc, tc, date)
+            ok, raw, blocked = self._one_attempt(fc, tc, date, back_date=back_date)
             if ok:
                 if self.rate_limit:
                     self._rate_record()
-                self.logger.info("[tuniu] %s 第 %d 圈拿到真实价格", date, attempt)
+                self.logger.info("[tuniu] %s 第 %d 圈拿到真实价格", tag, attempt)
                 return raw
             if self.max_attempts and attempt >= self.max_attempts:
                 self.logger.warning("[tuniu] %s 达到最大重试圈数 %d 仍未拿到价格%s",
-                                     date, self.max_attempts, "(疑似风控/179991)" if blocked else "")
+                                     tag, self.max_attempts, "(疑似风控/179991)" if blocked else "")
                 return None
-            time.sleep(self.backoff_s * (2 if blocked else 1))
+            time.sleep(self.backoff_s * (5 if blocked else 1) + random.uniform(1, 4))
 
     def fetch(self, from_city: str, to_city: str, dates: List[str]) -> List[FlightPrice]:
-        if self.skip_if_unsupported_round():
-            return []
-        results: List[FlightPrice] = []
-        fc, tc = from_city.upper(), to_city.upper()
-        for date in dates:
-            raw = self._hoop(fc, tc, date)
-            self._dump_raw(raw, f"tuniu_raw_{date}")
-            if raw is None:
-                self.logger.warning("[tuniu] %s 未拿到真实价格", date)
-                self._sleep()
-                continue
+        return self.fetch_quoted(from_city, to_city, dates)
 
-            offers = self._parse_offers(raw)
-            offers = self.filter_offers(offers)
-            best = self._lowest_offer(offers)
-            if best is not None and best.get("price"):
-                results.append(FlightPrice(
-                    platform=self.name,
-                    from_city=from_city, to_city=to_city,
-                    depart_date=date, price=float(best["price"]),
-                    airline=best.get("airline") or "",
-                    flight_no=best.get("flight_no") or "",
-                    depart_time=best.get("depart_time") or "",
-                    arrive_time=best.get("arrive_time") or "",
-                ))
-                self.logger.info("[tuniu] %s 最低价 ¥%.0f (%s %s)",
-                                 date, best["price"], best.get("airline") or "",
-                                 best.get("flight_no") or "")
-            else:
-                self.logger.warning("[tuniu] %s 未解析到价格", date)
-            self._sleep()
-        return results
+    def _is_inter_route(self, from_city: str, to_city: str) -> bool:
+        codes = {(from_city or "").upper(), (to_city or "").upper()}
+        if codes & INTER_CODES:
+            return True
+        mainland = {c for c in CITY_NAME if c not in INTER_CODES}
+        return bool(codes - mainland)
+
+    def quote_oneway(self, from_city: str, to_city: str, date: str,
+                     flight_nos=None, exact: bool = False) -> Optional[dict]:
+        if self._is_inter_route(from_city, to_city):
+            self.logger.info("[tuniu] 国际航线 %s→%s 不在国内接口覆盖范围", from_city, to_city)
+            return None
+        raw = self._hoop(from_city.upper(), to_city.upper(), date)
+        self._dump_raw(raw, f"tuniu_raw_{from_city}_{to_city}_{date}")
+        if raw is None:
+            return None
+        offers = self._parse_offers(raw)
+        return self.pick_best(offers, flight_nos=flight_nos or [], exact=exact)
+
+    def quote_round(self, from_city: str, to_city: str, date: str, return_date: str,
+                    flight_nos=None, return_flight_nos=None) -> Optional[dict]:
+        # 途牛两段查询返回的往往是去程列表，套票总价不可靠
+        return None
 
     @staticmethod
     def _to_price(v: Any) -> Optional[float]:
@@ -280,6 +285,48 @@ class TuniuCrawler(BaseCrawler):
         return {}
 
     @classmethod
+    def _detail_codes(cls, detail: dict) -> tuple:
+        dep = first_iata(
+            detail,
+            "departureAirportCode", "dPortCode", "dCityIataCode",
+            "orgAirportCode", "departureCityCode", "orgCityIataCode",
+            "dCityCode",
+        )
+        arr = first_iata(
+            detail,
+            "arrivalAirportCode", "aPortCode", "aCityIataCode",
+            "dstAirportCode", "arrivalCityCode", "dstCityIataCode",
+            "aCityCode",
+        )
+        date = ""
+        for key in ("departureDate", "departDate", "departureTime", "takeOffTime"):
+            v = str(detail.get(key) or "")
+            if len(v) >= 10 and v[4] == "-":
+                date = v[:10]
+                break
+        return dep, arr, date
+
+    @classmethod
+    def _legs_from_fare(cls, flight_nos_str: str, flight_list: dict) -> list:
+        nos = parse_itinerary_nos(flight_nos_str)
+        legs = []
+        trans = ""
+        for i, no in enumerate(nos):
+            detail = cls._find_flight_detail(flight_list, no)
+            dep, arr, date = cls._detail_codes(detail)
+            if not (no and dep and arr and date):
+                return []
+            if 0 < i < len(nos):
+                trans = dep or trans
+            legs.append({
+                "flight_no": no,
+                "from_code": dep,
+                "to_code": arr,
+                "date": date,
+            })
+        return legs
+
+    @classmethod
     def _parse_offers(cls, raw: Optional[dict]) -> List[dict]:
         if not raw:
             return []
@@ -294,15 +341,23 @@ class TuniuCrawler(BaseCrawler):
             flight_nos_str = options[0].get("flightNos") if options else None
             if not flight_nos_str:
                 continue
-            first_no = flight_nos_str.split("-")[0]
+            nos = parse_itinerary_nos(flight_nos_str)
+            first_no = nos[0] if nos else flight_nos_str.split("-")[0]
             detail = cls._find_flight_detail(flight_list, first_no)
             price = cls._adt_fare(fare.get("flightPriceList"))
+            legs = cls._legs_from_fare(flight_nos_str, flight_list)
+            trans = ""
+            if len(legs) >= 2:
+                trans = legs[0].get("to_code") or ""
             offer = {
                 "airline": detail.get("airlineCompany"),
-                "flight_no": flight_nos_str,
+                "flight_no": format_itinerary(nos) if nos else flight_nos_str,
+                "flight_nos": nos,
                 "depart_time": detail.get("departureTime"),
                 "arrive_time": detail.get("arrivalTime"),
                 "price": price,
+                "legs": legs,
+                "trans_code": trans,
             }
             key = (offer["flight_no"], offer["depart_time"], offer["price"])
             if key not in seen:

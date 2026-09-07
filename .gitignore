@@ -32,12 +32,14 @@ config.yaml
 
 # ===== 运行产物 =====
 data/
+!data/city_codes.json
 logs/
 debug/
 user_data/
 .monitor.pid
 *.log
 *.err
+release/
 
 # ===== 编辑器 / IDE =====
 .vscode/

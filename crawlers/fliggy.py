@@ -24,7 +24,8 @@ from typing import Any, List, Optional
 import httpx
 
 from core.models import FlightPrice
-from .base import BaseCrawler
+from core.flights import parse_itinerary_nos, format_itinerary, first_iata
+from .base import BaseCrawler, INTER_CODES, CITY_NAME
 
 UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
@@ -108,7 +109,7 @@ class FliggyCrawler(BaseCrawler):
             return False
         return bool(data.get("items")) or bool(data.get("lowestPrice"))
 
-    def _one_attempt(self, depart_code, arrive_code, depart_date):
+    def _one_attempt(self, depart_code, arrive_code, depart_date, back_date=None):
         client = httpx.Client(
             headers={
                 "User-Agent": self._ua() or UA,
@@ -122,7 +123,7 @@ class FliggyCrawler(BaseCrawler):
         )
         try:
             data_obj = {
-                "searchType": 1,
+                "searchType": 2 if back_date else 1,
                 "depCityCode": depart_code,
                 "arrCityCode": arrive_code,
                 "leaveDate": depart_date,
@@ -130,6 +131,8 @@ class FliggyCrawler(BaseCrawler):
                 "leaveCabinClass": "0",
                 "useAcrossAgent": 1,
             }
+            if back_date:
+                data_obj["backDate"] = back_date
             last = ""
             blocked = False
             for _ in range(max(self.max_poll, 2)):
@@ -154,71 +157,62 @@ class FliggyCrawler(BaseCrawler):
         finally:
             client.close()
 
-    def _hoop(self, fc, tc, date) -> Optional[dict]:
+    def _hoop(self, fc, tc, date, back_date=None) -> Optional[dict]:
         attempt = 0
+        tag = f"{date}/{back_date}" if back_date else date
         while True:
             attempt += 1
             if self.rate_limit:
                 self._rate_acquire()
-            ok, raw, blocked = self._one_attempt(fc, tc, date)
+            ok, raw, blocked = self._one_attempt(fc, tc, date, back_date=back_date)
             if ok:
                 if self.rate_limit:
                     self._rate_record()
-                self.logger.info("[fliggy] %s 第 %d 圈拿到真实价格", date, attempt)
+                self.logger.info("[fliggy] %s 第 %d 圈拿到真实价格", tag, attempt)
                 return raw
             if self.max_attempts and attempt >= self.max_attempts:
                 self.logger.warning("[fliggy] %s 达到最大重试圈数 %d 仍未拿到价格%s",
-                                     date, self.max_attempts, "(疑似风控)" if blocked else "")
+                                     tag, self.max_attempts, "(疑似风控)" if blocked else "")
                 return None
             time.sleep(self.backoff_s * (2 if blocked else 1))
 
     def fetch(self, from_city: str, to_city: str, dates: List[str]) -> List[FlightPrice]:
-        if self.skip_if_unsupported_round():
-            return []
-        results: List[FlightPrice] = []
-        fc, tc = from_city.upper(), to_city.upper()
-        for date in dates:
-            raw = self._hoop(fc, tc, date)
-            self._dump_raw(raw, f"fliggy_raw_{date}")
-            if raw is None:
-                self.logger.warning("[fliggy] %s 未拿到真实价格", date)
-                self._sleep()
-                continue
+        return self.fetch_quoted(from_city, to_city, dates)
 
-            offers = self._parse_offers(raw)
-            offers = self.filter_offers(offers)
-            best = self._lowest_offer(offers)
-            if best is not None and best.get("price"):
-                results.append(FlightPrice(
-                    platform=self.name,
-                    from_city=from_city, to_city=to_city,
-                    depart_date=date, price=float(best["price"]),
-                    airline=best.get("airline") or "",
-                    flight_no=best.get("flight_no") or "",
-                    depart_time=best.get("depart_time") or "",
-                    arrive_time=best.get("arrive_time") or "",
-                ))
-                self.logger.info("[fliggy] %s 最低价 ¥%.0f (%s %s)",
-                                 date, best["price"], best.get("airline") or "",
-                                 best.get("flight_no") or "")
-            else:
-                if getattr(self, "_route_flight_nos", None):
-                    self.logger.warning("[fliggy] %s 未解析到指定航班价格", date)
-                else:
-                    lp = (raw.get("data") or {}).get("lowestPrice")
-                    try:
-                        if lp and float(lp) > 0:
-                            results.append(FlightPrice(
-                                platform=self.name, from_city=from_city, to_city=to_city,
-                                depart_date=date, price=float(lp),
-                            ))
-                            self.logger.info("[fliggy] %s 最低价 ¥%.0f (lowestPrice)", date, float(lp))
-                        else:
-                            self.logger.warning("[fliggy] %s 未解析到价格", date)
-                    except Exception:
-                        self.logger.warning("[fliggy] %s 未解析到价格", date)
-            self._sleep()
-        return results
+    def _is_inter_route(self, from_city: str, to_city: str) -> bool:
+        codes = {(from_city or "").upper(), (to_city or "").upper()}
+        if codes & INTER_CODES:
+            return True
+        mainland = {c for c in CITY_NAME if c not in INTER_CODES}
+        return bool(codes - mainland)
+
+    def quote_oneway(self, from_city: str, to_city: str, date: str,
+                     flight_nos=None, exact: bool = False) -> Optional[dict]:
+        if self._is_inter_route(from_city, to_city):
+            self.logger.info("[fliggy] 国际航线 %s→%s，国内 MTOP 接口不支持", from_city, to_city)
+            return None
+        raw = self._hoop(from_city.upper(), to_city.upper(), date)
+        self._dump_raw(raw, f"fliggy_raw_{from_city}_{to_city}_{date}")
+        if raw is None:
+            return None
+        offers = self._parse_offers(raw)
+        best = self.pick_best(offers, flight_nos=flight_nos or [], exact=exact)
+        if best:
+            return best
+        if parse_itinerary_nos(flight_nos or []):
+            return None
+        lp = (raw.get("data") or {}).get("lowestPrice")
+        try:
+            if lp and float(lp) > 0:
+                return {"price": float(lp), "flight_no": "", "airline": ""}
+        except Exception:
+            pass
+        return None
+
+    def quote_round(self, from_city: str, to_city: str, date: str, return_date: str,
+                    flight_nos=None, return_flight_nos=None) -> Optional[dict]:
+        # 飞猪往返接口通常先出去程列表，套票总价不可靠；交给穷举用去程+返程单程相加
+        return None
 
     @staticmethod
     def _to_price(v: Any) -> Optional[float]:
@@ -227,6 +221,61 @@ class FliggyCrawler(BaseCrawler):
             return f if f > 0 else None
         except (TypeError, ValueError):
             return None
+
+    @classmethod
+    def _harvest_item(cls, ds: dict) -> dict:
+        nos: List[str] = []
+        trans = ""
+        dep = arr = ""
+        arr_date = ""
+
+        def walk(node):
+            nonlocal trans, dep, arr, arr_date
+            if isinstance(node, dict):
+                for key in ("flightName", "flightNo", "marketingFlightNo", "flightCode"):
+                    nos.extend(parse_itinerary_nos(node.get(key)))
+                t = first_iata(
+                    node, "transferCityCode", "transitCityCode",
+                    "stopCityCode", "transferAirportCode",
+                )
+                if t:
+                    trans = t
+                d = first_iata(
+                    node, "depCityCode", "depAirportCode", "departCityCode",
+                    "dCityCode", "orgCityCode",
+                )
+                a = first_iata(
+                    node, "arrCityCode", "arrAirportCode", "arriveCityCode",
+                    "aCityCode", "dstCityCode",
+                )
+                if d:
+                    dep = dep or d
+                if a:
+                    arr = a
+                for dk in ("arrDate", "arriveDate", "arrDateTime"):
+                    v = str(node.get(dk) or "")
+                    if len(v) >= 10 and v[4] == "-":
+                        arr_date = v[:10]
+                for v in node.values():
+                    walk(v)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(ds)
+        uniq = []
+        seen = set()
+        for n in nos:
+            if n not in seen:
+                seen.add(n)
+                uniq.append(n)
+        return {
+            "flight_nos": uniq,
+            "trans_code": trans,
+            "from_code": dep,
+            "to_code": arr,
+            "arrive_date": arr_date,
+        }
 
     @classmethod
     def _parse_offers(cls, raw: Optional[dict]) -> List[dict]:
@@ -240,16 +289,20 @@ class FliggyCrawler(BaseCrawler):
             if group.get("itemType") not in _FLIGHT_ITEM_TYPES:
                 continue
             for ds in group.get("itemDatas") or []:
-                flight_no = ds.get("flightName")
-                if not flight_no:
+                harvested = cls._harvest_item(ds)
+                nos = harvested["flight_nos"] or parse_itinerary_nos(ds.get("flightName"))
+                if not nos:
                     continue
                 price = cls._to_price(ds.get("bestPrice"))
                 offer = {
                     "airline": ds.get("airlineChineseName") or ds.get("airlineChineseShortName"),
-                    "flight_no": flight_no,
+                    "flight_no": format_itinerary(nos),
+                    "flight_nos": nos,
                     "depart_time": ds.get("depTime") or ds.get("depTimeShow"),
                     "arrive_time": ds.get("arrTime") or ds.get("arrTimeShow"),
                     "price": price,
+                    "trans_code": harvested.get("trans_code") or "",
+                    "arrive_date": harvested.get("arrive_date") or "",
                 }
                 key = (offer["flight_no"], offer["depart_time"], offer["price"])
                 if key not in seen:

@@ -1,0 +1,36 @@
+# 指定航程最低买法：海外往返 香港⇄首尔
+routes:
+  - from: HKG
+    from_name: 香港
+    to: ICN
+    to_name: 首尔
+    trip: round
+    monitor_mode: fare_plan
+    dates:
+      - "2026-11-01"
+    return_dates:
+      - "2026-11-08"
+    flight_nos:
+      - UO614
+    return_flight_nos:
+      - UO615
+    alert_threshold: 0
+
+platforms:
+  - qunar
+
+crawler:
+  headless: true
+  timeout_seconds: 60
+  delay_min: 15
+  delay_max: 25
+  sequential_platforms: true
+  rate_limit: true
+  backoff_seconds: 10
+  max_attempts: 4
+  debug: true
+  debug_dir: debug
+
+output:
+  db_path: data/test_specified_intl_rt.db
+  log_path: logs/test_specified_intl_rt.log

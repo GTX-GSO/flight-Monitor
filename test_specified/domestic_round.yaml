@@ -1,0 +1,38 @@
+# 指定航程最低买法：国内往返 深圳⇄烟台
+routes:
+  - from: SZX
+    from_name: 深圳
+    to: YNT
+    to_name: 烟台
+    trip: round
+    monitor_mode: fare_plan
+    dates:
+      - "2026-11-01"
+    return_dates:
+      - "2026-11-08"
+    flight_nos:
+      - CZ8595
+    return_flight_nos:
+      - MU2586
+    alert_threshold: 0
+
+platforms:
+  - qunar
+  - fliggy
+  - tongcheng
+
+crawler:
+  headless: true
+  timeout_seconds: 60
+  delay_min: 12
+  delay_max: 22
+  sequential_platforms: true
+  rate_limit: true
+  backoff_seconds: 8
+  max_attempts: 4
+  debug: true
+  debug_dir: debug
+
+output:
+  db_path: data/test_specified_domestic_rt.db
+  log_path: logs/test_specified_domestic_rt.log

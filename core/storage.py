@@ -1,6 +1,7 @@
 """SQLite 价格存储"""
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from typing import List, Optional
 
@@ -39,17 +40,21 @@ class PriceStorage:
     def __init__(self, db_path: str):
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self.db_path = db_path
+        self._lock = threading.Lock()
         self._init_schema()
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        with self._lock:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=30000")
+                yield conn
+                conn.commit()
+            finally:
+                conn.close()
 
     def _init_schema(self):
         with self._conn() as c:
@@ -70,6 +75,36 @@ class PriceStorage:
     def save_many(self, prices: List[FlightPrice]):
         for p in prices:
             self.save(p)
+
+    def list_recent(self, limit: int = 200, from_city: str = "",
+                    to_city: str = "") -> List[sqlite3.Row]:
+        sql = "SELECT * FROM flight_prices WHERE 1=1"
+        args: list = []
+        if from_city:
+            sql += " AND from_city=?"
+            args.append(from_city.strip().upper())
+        if to_city:
+            sql += " AND to_city=?"
+            args.append(to_city.strip().upper())
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(int(limit))
+        with self._conn() as c:
+            return list(c.execute(sql, args).fetchall())
+
+    def list_latest_snapshot(self, limit: int = 50) -> List[sqlite3.Row]:
+        """每个 平台+航线+日期 的最近一条。"""
+        sql = """
+        SELECT fp.* FROM flight_prices fp
+        INNER JOIN (
+            SELECT platform, from_city, to_city, depart_date, MAX(id) AS max_id
+            FROM flight_prices
+            GROUP BY platform, from_city, to_city, depart_date
+        ) t ON fp.id = t.max_id
+        ORDER BY fp.fetched_at DESC, fp.id DESC
+        LIMIT ?
+        """
+        with self._conn() as c:
+            return list(c.execute(sql, (int(limit),)).fetchall())
 
     def last_lowest(self, from_city: str, to_city: str, depart_date: str,
                     platform: Optional[str] = None) -> Optional[sqlite3.Row]:
@@ -103,6 +138,8 @@ class PriceStorage:
                 (route_key, price, now),
             )
 
-    def clear_alert_state(self, route_key: str):
+    def clear_prices(self):
+        """清空全部历史报价和推送去抖状态。"""
         with self._conn() as c:
-            c.execute("DELETE FROM alert_state WHERE route_key=?", (route_key,))
+            c.execute("DELETE FROM flight_prices")
+            c.execute("DELETE FROM alert_state")

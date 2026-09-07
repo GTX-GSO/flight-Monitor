@@ -1,0 +1,32 @@
+# 临时测试：香港→首尔 往返 最低价模式（全平台）
+routes:
+  - from: HKG
+    from_name: 香港
+    to: ICN
+    to_name: 首尔
+    trip: round
+    monitor_mode: lowest
+    dates:
+      - "2026-11-01"
+    return_dates:
+      - "2026-11-08"
+    alert_threshold: 0
+
+platforms:
+  - ctrip
+  - fliggy
+  - tongcheng
+  - qunar
+  - tuniu
+
+crawler:
+  headless: true
+  timeout_seconds: 60
+  delay_min: 1
+  delay_max: 2
+  debug: true
+  debug_dir: debug
+
+output:
+  db_path: data/test_hkg_icn.db
+  log_path: logs/test_hkg_icn.log

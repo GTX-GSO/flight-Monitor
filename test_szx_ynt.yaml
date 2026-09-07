@@ -1,0 +1,42 @@
+# 临时测试：深圳→烟台 单程 + 往返 最低价模式（全平台）
+routes:
+  - from: SZX
+    from_name: 深圳
+    to: YNT
+    to_name: 烟台
+    trip: one_way
+    monitor_mode: lowest
+    dates:
+      - "2026-11-01"
+    alert_threshold: 0
+
+  - from: SZX
+    from_name: 深圳
+    to: YNT
+    to_name: 烟台
+    trip: round
+    monitor_mode: lowest
+    dates:
+      - "2026-11-01"
+    return_dates:
+      - "2026-11-08"
+    alert_threshold: 0
+
+platforms:
+  - ctrip
+  - fliggy
+  - tongcheng
+  - qunar
+  - tuniu
+
+crawler:
+  headless: true
+  timeout_seconds: 60
+  delay_min: 1
+  delay_max: 2
+  debug: true
+  debug_dir: debug
+
+output:
+  db_path: data/test_szx_ynt.db
+  log_path: logs/test_szx_ynt.log

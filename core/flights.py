@@ -113,3 +113,60 @@ def format_itinerary(nos: Sequence[str]) -> str:
 
 def format_wanted(wanted: Sequence[Sequence[str]]) -> str:
     return ", ".join(format_itinerary(g) for g in wanted)
+
+
+def iata3(value) -> str:
+    s = str(value or "").strip().upper()
+    return s if re.fullmatch(r"[A-Z]{3}", s) else ""
+
+
+def first_iata(node: Optional[dict], *keys: str) -> str:
+    if not isinstance(node, dict):
+        return ""
+    for key in keys:
+        code = iata3(node.get(key))
+        if code:
+            return code
+    return ""
+
+
+def normalize_offer(offer: Optional[dict]) -> dict:
+    """补齐 flight_nos / legs，方便筛选和拆段询价。"""
+    if not offer:
+        return {}
+    o = dict(offer)
+    nos = o.get("flight_nos") or parse_itinerary_nos(o.get("flight_no"))
+    o["flight_nos"] = nos
+    if not o.get("flight_no") and nos:
+        o["flight_no"] = format_itinerary(nos)
+    if not o.get("legs"):
+        o["legs"] = parse_legs(
+            o.get("code") or o.get("flightKey") or o.get("flight_no")
+        )
+    return o
+
+
+def guess_legs(offer: dict, from_code: str, to_code: str, date: str) -> List[dict]:
+    """组合票若无完整航段，用中转城市码拼两段（隔夜日期未知时共用去程日）。"""
+    o = normalize_offer(offer)
+    if o.get("legs"):
+        return list(o["legs"])
+    nos = o.get("flight_nos") or []
+    trans = (o.get("trans_code") or "").strip().upper()
+    if len(nos) < 2 or not trans:
+        return []
+    arr_date = (o.get("arrive_date") or date or "")[:10] or date
+    return [
+        {
+            "flight_no": nos[0],
+            "from_code": (from_code or "").upper(),
+            "to_code": trans,
+            "date": date,
+        },
+        {
+            "flight_no": nos[-1],
+            "from_code": trans,
+            "to_code": (to_code or "").upper(),
+            "date": arr_date,
+        },
+    ]

@@ -77,6 +77,10 @@ def build_fare_plan(
     def add(oid: str, label: str, price: Optional[float], parts=None):
         if price is None:
             return
+        # 与已有方案同价（差<1）则跳过，避免修正后多种买法重复刷屏
+        for old in options:
+            if abs(float(old["price"]) - float(price)) < 1.0:
+                return
         options.append({
             "id": oid,
             "label": label,

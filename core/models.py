@@ -40,10 +40,15 @@ class Route:
     trip: str = "one_way"  # one_way | round
     return_dates: list = field(default_factory=list)
     return_flight_nos: list = field(default_factory=list)
+    monitor_mode: str = "lowest"  # lowest 监控最低价 | fare_plan 指定航程穷举买法
 
     @property
     def is_round(self) -> bool:
         return (self.trip or "one_way") == "round"
+
+    @property
+    def is_fare_plan(self) -> bool:
+        return (self.monitor_mode or "lowest") == "fare_plan"
 
     def date_pairs(self):
         """[(去程日期, 返程日期)]，单程返程日期为空字符串。"""

@@ -9,12 +9,13 @@ routes:
     to: KMG
     to_name: 昆明
     trip: round                   # one_way（默认单程）| round 往返
+    monitor_mode: lowest          # lowest | fare_plan
     dates:
       - "2026-09-25"              # 去程
     return_dates:
       - "2026-10-07"              # 返程
-    # 填写航班号后，去哪儿会穷举：往返套票 / 去程+返程分别买 / 各航段单买
-    # flight_nos:                 # 可选，去程（中转写成 MU9658+MU5931）
+    # monitor_mode: fare_plan  # 指定航程最低买法（需配合 flight_nos，查询次数多）
+    # flight_nos:             # fare_plan 模式必填；lowest 模式可选（仅筛选，不穷举）
     #   - MU5735
     # return_flight_nos:          # 可选，返程
     #   - MU5736
@@ -27,16 +28,16 @@ platforms:
 
 # 调度配置
 schedule:
-  interval_minutes: 90        # 基础间隔（分钟）
-  jitter_minutes: 30            # 随机扰动，实际间隔在 [interval-jitter, interval+jitter]
+  interval_minutes: 60        # 基础间隔（分钟）
+  jitter_minutes: 15          # 随机扰动，实际间隔在 [interval-jitter, interval+jitter]
   run_on_start: true            # 启动时是否立即执行一次
 
 # 爬虫配置
 crawler:
-  headless: false              # 无头模式；首次跑建议 false 以便观察反爬
+  headless: true               # 无头模式；登录时可临时改为 false
   timeout_seconds: 45
-  delay_min: 5                 # 单次请求间随机等待（秒）
-  delay_max: 15
+  delay_min: 30                # 单次请求间随机等待（秒）
+  delay_max: 60
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
   mobile_user_agent: ""        # 留空用内置 iPhone Safari UA
   debug: true                  # 解析失败时保存截图+HTML 到 debug_dir
